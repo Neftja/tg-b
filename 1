@@ -1,0 +1,245 @@
+#from celery import Celery 
+import time 
+import asyncio 
+import conf 
+#import pandas as pd 
+
+from tinkoff.invest import ( 
+    AsyncClient, 
+    CandleInstrument, 
+    MarketDataRequest, 
+    SubscribeCandlesRequest, 
+    SubscriptionAction, 
+    SubscriptionInterval, 
+    SubscribeTradesRequest, 
+    TradeInstrument, 
+) 
+
+#from sqlalchemy.orm import Session 
+#from sqlalchemy import create_engine 
+#import postgresql_tables 
+import telegram_bot 
+  
+#app = Celery('tasks', broker='redis://172.29.112.1', result_backend='db+sqlite:////home/user/Trading_bot/file.db') 
+
+################### 
+
+
+
+#engine = create_engine(f"postgresql+psycopg2://postgres:{conf.POSTGRESQL_PASS}@172.29.112.1:5432/postgres") 
+#connection = engine.raw_connection() 
+#cursor = connection.cursor() 
+
+TOKEN = conf.TOKEN 
+
+
+async def send_message(text: str) -> None: 
+    await telegram_bot.main(text=text) 
+
+# async def write_share_orders(stream_orders: dict) -> None: 
+#     """ 
+#     dict_candles['Direction'] принимает значение 1 или 2, что соответствует buy и sell 
+#     """      
+#     cursor.execute(f"""INSERT INTO public."Orders_{stream_orders['FIGI']}" (direction, price, quantity, tim) 
+#                        VALUES ('{stream_orders['Direction']}', '{stream_orders['Price']}', '{stream_orders['Quantity']}', '{stream_orders['Time']}');""") 
+#     connection.commit() 
+
+
+# async def write_share_candles(stream_sdelki: dict, figi: str) -> None: 
+#     cursor.execute(f"""INSERT INTO public."Candle_{figi}" (open, high, low, close, volume, tim) 
+#                        VALUES ('{stream_sdelki['Open']}', '{stream_sdelki['High']}', '{stream_sdelki['Low']}', '{stream_sdelki['Close']}', '{stream_sdelki['Volume']}', '{stream_sdelki['last_trade_ts']}');""") 
+#     connection.commit() 
+
+
+################################################## ТУТ ДОЛЖЕН БЫТЬ ОСНОВНОЙ БЛОК ####################################### 
+def see_dominance_orders(direction: str, quantity: int, mas_direction_price: dict):
+    """
+    Доминация продовца или покупатиля  
+    """
+  
+    if direction == direction.TRADE_DIRECTION_BUY:
+        mas_direction_price['1'] += quantity
+    else:
+        mas_direction_price['2'] += quantity
+    
+    if mas_direction_price['1'] > mas_direction_price['2']:
+        print("Buy > Sell", mas_direction_price['1']/mas_direction_price['2'])
+    elif mas_direction_price['2'] > mas_direction_price['1']:
+        print("Sell > Buy", mas_direction_price['2']/mas_direction_price['1'])
+    print(mas_direction_price)
+
+
+
+
+
+def zero_point_search(price: float, cnt: int, times: int): 
+    """
+    тут просто точка отчета
+    """ 
+
+    if cnt == 0: 
+        time_zero_order = times 
+        price_zero_order = price 
+    return time_zero_order, price_zero_order 
+
+def find_up_candle(flag_orders: bool, price: float, price_zero_order: float) -> bool:
+    koef_up = 0.2
+    pricce_enter_position = price + price * koef_up/100 
+    
+    if pricce_enter_position < price_zero_order: 
+        print('YES')
+        
+        # тут вызов функции покупки
+        flag_orders = True
+
+    return flag_orders, pricce_enter_position
+
+def chek_time_candle(time_zero_order, price_zero_order, times: int, price: float): 
+    """
+    Разбиваем поток на минуты. 
+    Устанавливаем цену на первую сделку для этой минуты для точки отчета изменения цены
+    """
+    
+    if time_zero_order < times or (time_zero_order == 59 and times == 1): 
+        time_zero_order = times 
+        price_zero_order = price 
+
+    return time_zero_order, price_zero_order
+
+def find_close_posicion(price: float, pricce_enter_position: float, max_prise: float, flag_orders: bool):
+    """
+    есть 2 стротегии:
+    - резкое повышение цены
+    - следить за последними 2 - 3 свечками 
+    'возможно найдем максимальную цену'
+    """
+
+    if pricce_enter_position < price:
+        print('закрытие позиции, ниже уровня входа')
+
+        # закрыть позицию
+        flag_orders = False
+        return flag_orders
+
+    elif max_prise < price:
+        # держим позицию
+        print('Держим позицию')
+        max_prise = price
+
+
+####################################################################################################################### 
+""" 
+Нужен таймер или иное условие сохрание данных 
+""" 
+
+async def write_shares(**kwargs): 
+    print(kwargs) 
+    async def request_iterator(): 
+        yield MarketDataRequest( 
+                subscribe_trades_request=SubscribeTradesRequest( 
+                subscription_action=SubscriptionAction.SUBSCRIPTION_ACTION_SUBSCRIBE, 
+                instruments=[ 
+                    TradeInstrument( 
+                        figi=kwargs['figis']                         
+                    ) 
+                ], 
+            ) 
+        ) 
+        # yield MarketDataRequest( 
+        #     subscribe_candles_request=SubscribeCandlesRequest( 
+        #         subscription_action=SubscriptionAction.SUBSCRIPTION_ACTION_SUBSCRIBE, 
+        #         instruments=[ 
+        #             CandleInstrument( 
+        #                 figi=kwargs['figis'], 
+        #                 interval=SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE, 
+        #             ), 
+        #             # регистрация на стрим на несколько shares 
+        #             # CandleInstrument( 
+        #             #     figi="BBG004S684M6", 
+        #             #     interval=SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE, 
+        #             # ), 
+        #         ] 
+        #     ) 
+        # ) 
+        while True: 
+            await asyncio.sleep(1) 
+  
+    async with AsyncClient(TOKEN) as client: 
+        cnt = 0 
+        flag_orders = False   
+        max_prise = 0
+        mas_direction_price = {'1': 1,
+                               '2': 1}
+        tel = 0
+        async for marketdata in client.market_data_stream.market_data_stream( 
+            request_iterator() 
+        ):   
+             
+            if marketdata.trade != None: 
+                stream_orders = {} 
+                stream_orders['FIGI'] = marketdata.trade.figi 
+                stream_orders['Direction'] = marketdata.trade.direction
+                stream_orders['Price'] = f'{marketdata.trade.price.units}.{marketdata.trade.price.nano}' 
+                stream_orders['Quantity'] = marketdata.trade.quantity 
+                stream_orders['Time'] = marketdata.trade.time.strftime("%Y-%m-%d %H:%M:%S") 
+                print(stream_orders)  
+
+                times = int(stream_orders['Time'][-5:-3])
+                price = float(stream_orders['Price'])
+                direction = stream_orders['Direction']
+                quantity = stream_orders['Quantity']
+
+                print('Times: ', times)
+
+                
+
+
+
+                if cnt == 0: 
+                    time_zero_order, price_zero_order = zero_point_search(price, cnt, times) 
+                
+                if not flag_orders:
+                    time_zero_order, price_zero_order = chek_time_candle(time_zero_order, price_zero_order, times, price)     
+                    flag_orders, pricce_enter_position = find_up_candle(flag_orders, price, price_zero_order)
+
+                elif flag_orders:
+                    if tel == 0:
+                        tel += 1
+                        await telegram_bot.main(text="Yes")
+                    else:
+                        flag_orders = find_close_posicion(price, pricce_enter_position, max_prise, flag_orders)
+                        see_dominance_orders(direction, quantity, mas_direction_price)
+
+                cnt += 1 
+
+
+
+
+
+            # if marketdata.candle != None: 
+            #     stream_sdelki = {} 
+            #     #stream_sdelki['FIGI'] = marketdata.candle.figi 
+            #     stream_sdelki['Open'] = f'{marketdata.candle.open.units}.{marketdata.candle.open.nano}' 
+            #     stream_sdelki['High'] = f'{marketdata.candle.high.units}.{marketdata.candle.high.nano}' 
+            #     stream_sdelki['Low'] = f'{marketdata.candle.low.units}.{marketdata.candle.low.nano}' 
+            #     stream_sdelki['Close'] = f'{marketdata.candle.close.units}.{marketdata.candle.close.nano}' 
+            #     stream_sdelki['Volume'] = marketdata.candle.volume 
+            #     stream_sdelki['last_trade_ts'] = marketdata.candle.last_trade_ts.strftime("%Y-%m-%d %H:%M:%S")  
+            #     print(stream_sdelki) 
+            #     await write_share_candles(stream_sdelki, kwargs['figis']) 
+
+
+
+# @app.task(track_started = True) 
+# def celery_task(**kwargs): 
+#     loop = asyncio.get_event_loop() 
+#     return loop.run_until_complete(write_shares(**kwargs)) 
+
+# запись в файл csv построчно 
+# запись в файл csv датафрейм 
+# запись в бд
+kwargs = {}
+kwargs['figis'] = 'BBG004730N88'
+
+if __name__ == "__main__":
+    asyncio.run(write_shares(**kwargs))
